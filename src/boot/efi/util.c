@@ -91,6 +91,15 @@ EFI_STATUS efivar_set_uint_string(const EFI_GUID *vendor, const CHAR16 *name, UI
         return efivar_set(vendor, name, str, flags);
 }
 
+EFI_STATUS efivar_set_uint16_le(const EFI_GUID *vendor, const CHAR16 *name, UINT16 value, UINT32 flags) {
+        UINT8 buf[2];
+
+        buf[0] = (UINT8)(value >> 0U & 0xFF);
+        buf[1] = (UINT8)(value >> 8U & 0xFF);
+
+        return efivar_set_raw(vendor, name, buf, sizeof(buf), flags);
+}
+
 EFI_STATUS efivar_set_uint32_le(const EFI_GUID *vendor, const CHAR16 *name, UINT32 value, UINT32 flags) {
         UINT8 buf[4];
 
@@ -159,6 +168,22 @@ EFI_STATUS efivar_get_uint_string(const EFI_GUID *vendor, const CHAR16 *name, UI
         err = efivar_get(vendor, name, &val);
         if (!EFI_ERROR(err) && i)
                 *i = Atoi(val);
+
+        return err;
+}
+
+EFI_STATUS efivar_get_uint16_le(const EFI_GUID *vendor, const CHAR16 *name, UINT16 *ret) {
+        _cleanup_freepool_ CHAR8 *buf = NULL;
+        UINTN size;
+        EFI_STATUS err;
+
+        err = efivar_get_raw(vendor, name, &buf, &size);
+        if (!EFI_ERROR(err) && ret) {
+                if (size != sizeof(UINT16))
+                        return EFI_BUFFER_TOO_SMALL;
+
+                *ret = (UINT16) buf[0] << 0U | (UINT16) buf[1] << 8U;
+        }
 
         return err;
 }
