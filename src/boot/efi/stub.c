@@ -12,6 +12,23 @@
 #include "splash.h"
 #include "util.h"
 
+static void __attribute__((used)) _debug(const char *func, int line,
+        const CHAR16 *fmt, ...)
+{
+        va_list ap;
+
+        va_start(ap, fmt);
+        Print(L"*** debug: %a:%d: ", func, line);
+        VPrint(fmt, ap);
+        va_end(ap);
+}
+
+#if defined(DEBUG)
+# define debug(_args...) do {_debug(__func__, __LINE__, _args);} while(0)
+#else
+# define debug(_args...) while(0) {_debug("ERROR: ", __LINE__, _args);}
+#endif
+
 /* magic string to find in the binary image */
 static const char __attribute__((used)) magic[] = "#### LoaderInfo: systemd-stub " GIT_VERSION " ####";
 
@@ -120,6 +137,8 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *sys_table) {
 
         if (szs[3] > 0)
                 graphics_splash((UINT8 *)((UINTN)loaded_image->ImageBase + addrs[3]), szs[3], NULL);
+
+        debug(L"Calling linux_exec\n");
 
         err = linux_exec(image, cmdline, cmdline_len,
                          (UINTN)loaded_image->ImageBase + addrs[1],
