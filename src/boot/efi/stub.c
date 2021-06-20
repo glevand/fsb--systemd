@@ -29,6 +29,249 @@ static void __attribute__((used)) _debug(const char *func, int line,
 # define debug(_args...) while(0) {_debug("ERROR: ", __LINE__, _args);}
 #endif
 
+static const UINT64 fsb_watchdogcode = 0x10022;
+
+static const UINT32 __attribute__((used)) attributes_nv_ba_ra = (
+        EFI_VARIABLE_NON_VOLATILE
+        | EFI_VARIABLE_BOOTSERVICE_ACCESS
+        | EFI_VARIABLE_RUNTIME_ACCESS
+);
+
+static const UINT32 __attribute__((used)) attributes_ba_ra = (
+        EFI_VARIABLE_BOOTSERVICE_ACCESS
+        | EFI_VARIABLE_RUNTIME_ACCESS
+);
+
+static void __attribute__((used)) efi_wdt_set(UINTN timeout)
+{
+//   IN UINTN                    Timeout,
+//   IN UINT64                   WatchdogCode,
+//   IN UINTN                    DataSize,
+//   IN CHAR16                   *WatchdogData OPTIONAL
+
+        EFI_STATUS result;
+
+        result = uefi_call_wrapper(BS->SetWatchdogTimer, 4, timeout,
+                fsb_watchdogcode, 0, NULL);
+
+        if (EFI_ERROR(result)) {
+                debug(L"SetWatchdogTimer FAILED: %d\n", result);
+        } else {
+                debug(L"SetWatchdogTimer OK (%llu sec.).\n", timeout);
+        }
+
+}
+
+struct vendor_id {
+        const CHAR16 str[37];
+        const EFI_GUID bin;
+};
+
+static const struct vendor_id efi_vendor_id = {
+        .str = L"8be4df61-93ca-11d2-aa0d-00e098032b8c",
+        .bin = {0x8be4df61, 0x93ca, 0x11d2,
+                {0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c}},
+};
+
+static const struct vendor_id fsb_vendor_id = {
+        .str = L"9c4b2ad9-cff6-485b-ac30-5398aec7605c",
+        .bin = {0x9c4b2ad9, 0xcff6, 0x485b,
+                {0xac, 0x30, 0x53, 0x98, 0xae, 0xc7, 0x60, 0x5c}},
+};
+
+struct efi_var_name {
+        const struct vendor_id *vid;
+        const CHAR16 *name;
+};
+
+static void __attribute__((used)) efi_var_print(const struct efi_var_name *vn)
+{
+        _cleanup_freepool_ CHAR8 *buf = NULL;
+        UINTN size;
+        EFI_STATUS result;
+
+        result = efivar_get_raw(&vn->vid->bin, vn->name, &buf, &size);
+
+        if (EFI_ERROR(result)) {
+                debug(L"efivar_get_raw '%s' FAILED.\n", vn->name);
+        } else {
+                UINTN i;
+
+                debug(L"efivar_get_raw '%s' OK: size = %d\n", vn->name, size);
+                debug(L"'%s' = ", vn->name);
+                for (i = 0; i < size; i++) {
+                        Print(L"%02x ", buf[i]);
+                }
+                Print(L"\n");
+        }
+}
+
+struct efi_16_var {
+        struct efi_var_name vn;
+        UINT32 attributes;
+        UINT16 value;
+};
+
+static EFI_STATUS get_16(struct efi_16_var *v)
+{
+        EFI_STATUS result;
+
+        result = efivar_get_uint16_le(&v->vn.vid->bin, v->vn.name, &v->value);
+
+        if (EFI_ERROR(result)) {
+                debug(L"%s: get %s FAILED: %d\n", v->vn.vid->str, v->vn.name,
+                        result);
+        } else {
+                debug(L"%s: get %s OK: 0x%x (%d)\n", v->vn.vid->str, v->vn.name,
+                        v->value, v->value);
+        }
+
+        return result;
+}
+
+static EFI_STATUS set_16(struct efi_16_var *v)
+{
+        EFI_STATUS result;
+
+        result = efivar_set_uint16_le(&v->vn.vid->bin, v->vn.name, v->value,
+                v->attributes);
+
+        if (EFI_ERROR(result)) {
+                debug(L"%s: set %s FAILED: %d\n", v->vn.vid->str, v->vn.name,
+                      result);
+        } else {
+                debug(L"%s: set %s OK: 0x%x (%d)\n", v->vn.vid->str, v->vn.name,
+                        v->value, v->value);
+        }
+
+        return result;
+}
+
+static void test_efi_16_var(void)
+{
+        struct efi_16_var v = {
+                .vn.vid = &efi_vendor_id,
+                .attributes = attributes_nv_ba_ra,
+        };
+        EFI_STATUS result;
+        UINT16 old_value;
+
+        v.vn.name = L"BootCurrent";
+        result = get_16(&v);
+
+        v.vn.name = L"BootNext";
+        result = get_16(&v);
+
+        old_value = v.value;
+        v.value = 0xab;
+        result = set_16(&v);
+
+        result = get_16(&v);
+
+        v.value = old_value;
+        result = set_16(&v);
+
+        (void)result;
+}
+
+static UINT16 map_bump_index(UINT16 index)
+{
+        return index ? 0 : 1;
+}
+
+static UINT16 map_get_value(const struct efi_16_var *map,
+        const struct efi_16_var *index)
+{
+        return (map->value >> (8 * index->value)) & 0xff;
+}
+
+static void run_fail_safe_boot(void)
+{
+        static const UINT16 fsb_counter_max = 3;
+        struct efi_16_var fsb_counter = {
+                .vn.name = L"fsb-counter",
+                .vn.vid = &fsb_vendor_id,
+                .attributes = attributes_nv_ba_ra,
+        };
+        struct efi_16_var fsb_map = {
+                .vn.name = L"fsb-map",
+                .vn.vid = &fsb_vendor_id,
+                .attributes = attributes_nv_ba_ra,
+        };
+        struct efi_16_var fsb_index = {
+                .vn.name = L"fsb-index",
+                .vn.vid = &fsb_vendor_id,
+                .attributes = attributes_nv_ba_ra,
+        };
+        struct efi_16_var efi_boot_next = {
+                .vn.name = L"BootNext",
+                .vn.vid = &efi_vendor_id,
+                .attributes = attributes_nv_ba_ra,
+        };
+        EFI_STATUS result;
+
+        result = get_16(&fsb_counter);
+
+        if (EFI_ERROR(result)) {
+                debug(L"get_16 fsb_counter FAILED: %d\n", result);
+        }
+
+        result = get_16(&fsb_map);
+
+        if (EFI_ERROR(result)) {
+                debug(L"get_16 fsb_map FAILED: %d\n", result);
+        }
+
+        result = get_16(&fsb_index);
+
+        if (EFI_ERROR(result)) {
+                debug(L"get_16 fsb_index FAILED: %d\n", result);
+        }
+
+        if (fsb_counter.value >= fsb_counter_max) {
+                UINT16 old_index;
+                UINT16 old_map;
+
+                old_index = fsb_index.value;
+                old_map = map_get_value(&fsb_map, &fsb_index);
+
+                fsb_index.value = map_bump_index(fsb_index.value);
+
+                result = set_16(&fsb_index);
+
+                if (EFI_ERROR(result)) {
+                        debug(L"set_16 fsb_index FAILED: %d\n", result);
+                }
+
+                Print(L"FSB: Switching boot: %d (%d) -> %d (%d)\n", old_index,
+                        old_map, fsb_index.value,
+                        map_get_value(&fsb_map, &fsb_index));
+
+                fsb_counter.value = 0;
+        }
+
+        fsb_counter.value++;
+
+        result = set_16(&fsb_counter);
+
+        if (EFI_ERROR(result)) {
+                debug(L"set_16 fsb_counter FAILED: %d\n", result);
+        }
+
+        efi_boot_next.value = map_get_value(&fsb_map, &fsb_index);
+
+        result = set_16(&efi_boot_next);
+
+        if (EFI_ERROR(result)) {
+                debug(L"set_16 efi_boot_next FAILED: %d\n", result);
+        }
+
+        Print(L"fail-safe: Vendor ID = '%s'\n", fsb_vendor_id.str);
+        Print(L"fail-safe: counter = %d\n", fsb_counter.value);
+        Print(L"fail-safe: index = %d\n", fsb_index.value);
+        Print(L"fail-safe: next = %d\n", efi_boot_next.value);
+}
+
 /* magic string to find in the binary image */
 static const char __attribute__((used)) magic[] = "#### LoaderInfo: systemd-stub " GIT_VERSION " ####";
 
@@ -137,6 +380,16 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *sys_table) {
 
         if (szs[3] > 0)
                 graphics_splash((UINT8 *)((UINTN)loaded_image->ImageBase + addrs[3]), szs[3], NULL);
+
+        if (0) {
+                test_efi_16_var();
+        }
+
+        run_fail_safe_boot();
+
+        if (1) {
+                efi_wdt_set(5);
+        }
 
         debug(L"Calling linux_exec\n");
 
